@@ -13,42 +13,51 @@
  */
 package com.facebook.presto.sql.planner.iterative.rule;
 
+import com.facebook.presto.matching.Capture;
 import com.facebook.presto.matching.Captures;
 import com.facebook.presto.matching.Pattern;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.sql.planner.iterative.Rule;
-import com.facebook.presto.sql.planner.iterative.RuleSet;
 import com.facebook.presto.sql.planner.optimizations.TableLayoutRewriter;
 import com.facebook.presto.sql.planner.plan.FilterNode;
 import com.facebook.presto.sql.planner.plan.PlanNode;
 import com.facebook.presto.sql.planner.plan.TableScanNode;
-import com.facebook.presto.sql.planner.plan.ValuesNode;
 import com.facebook.presto.sql.tree.BooleanLiteral;
 import com.google.common.collect.ImmutableSet;
 
-import java.util.Optional;
+import java.util.Objects;
 import java.util.Set;
 
+import static com.facebook.presto.matching.Capture.newCapture;
 import static com.facebook.presto.sql.planner.plan.Patterns.filter;
+import static com.facebook.presto.sql.planner.plan.Patterns.source;
 import static com.facebook.presto.sql.planner.plan.Patterns.tableScan;
 import static java.util.Objects.requireNonNull;
 
 public class PickTableLayout
-        implements RuleSet
 {
-    private final ImmutableSet<Rule<?>> rules;
+    private final Metadata metadata;
 
     public PickTableLayout(Metadata metadata)
     {
-        rules = ImmutableSet.of(
-                new PickTableLayoutForPredicate(metadata),
-                new PickTableLayoutWithoutPredicate(metadata));
+        this.metadata = requireNonNull(metadata, "metadata is null");
     }
 
-    @Override
     public Set<Rule<?>> rules()
     {
-        return rules;
+        return ImmutableSet.of(
+                pickTableLayoutForPredicate(),
+                pickTableLayoutWithoutPredicate());
+    }
+
+    public PickTableLayoutForPredicate pickTableLayoutForPredicate()
+    {
+        return new PickTableLayoutForPredicate(metadata);
+    }
+
+    public PickTableLayoutWithoutPredicate pickTableLayoutWithoutPredicate()
+    {
+        return new PickTableLayoutWithoutPredicate(metadata);
     }
 
     private static final class PickTableLayoutForPredicate
@@ -61,7 +70,16 @@ public class PickTableLayout
             this.metadata = requireNonNull(metadata, "metadata is null");
         }
 
-        private static final Pattern<FilterNode> PATTERN = filter();
+        private static final Capture<TableScanNode> TABLE_SCAN = newCapture();
+
+        private static final Pattern<FilterNode> PATTERN = filter().with(source().matching(
+                tableScan().matching(PickTableLayoutForPredicate::shouldRewriteTableLayout)
+                        .capturedAs(TABLE_SCAN)));
+
+        private static boolean shouldRewriteTableLayout(TableScanNode source)
+        {
+            return !source.getLayout().isPresent() || source.getCurrentConstraint().isAll();
+        }
 
         @Override
         public Pattern<FilterNode> getPattern()
@@ -70,27 +88,37 @@ public class PickTableLayout
         }
 
         @Override
-        public Optional<PlanNode> apply(FilterNode filterNode, Captures captures, Context context)
+        public Result apply(FilterNode filterNode, Captures captures, Context context)
         {
-            PlanNode source = context.getLookup().resolve(filterNode.getSource());
-
-            if (!((source instanceof TableScanNode) && shouldRewriteTableLayout((TableScanNode) source))) {
-                return Optional.empty();
-            }
+            TableScanNode tableScan = captures.get(TABLE_SCAN);
 
             TableLayoutRewriter tableLayoutRewriter = new TableLayoutRewriter(metadata, context.getSession(), context.getSymbolAllocator(), context.getIdAllocator());
-            PlanNode rewrittenTableScan = tableLayoutRewriter.planTableScan((TableScanNode) source, filterNode.getPredicate());
+            PlanNode rewritten = tableLayoutRewriter.planTableScan(captures.get(TABLE_SCAN), filterNode.getPredicate());
 
-            if (rewrittenTableScan instanceof TableScanNode || rewrittenTableScan instanceof ValuesNode || (((FilterNode) rewrittenTableScan).getPredicate() != filterNode.getPredicate())) {
-                return Optional.of(rewrittenTableScan);
+            if (arePlansSame(filterNode, tableScan, rewritten)) {
+                return Result.empty();
             }
 
-            return Optional.empty();
+            return Result.ofPlanNode(rewritten);
         }
 
-        private boolean shouldRewriteTableLayout(TableScanNode source)
+        private boolean arePlansSame(FilterNode filter, TableScanNode tableScan, PlanNode rewritten)
         {
-            return !source.getLayout().isPresent() || source.getOriginalConstraint() == BooleanLiteral.TRUE_LITERAL;
+            if (!(rewritten instanceof FilterNode)) {
+                return false;
+            }
+
+            FilterNode rewrittenFilter = (FilterNode) rewritten;
+            if (!Objects.equals(filter.getPredicate(), rewrittenFilter.getPredicate())) {
+                return false;
+            }
+
+            if (!(rewrittenFilter.getSource() instanceof TableScanNode)) {
+                return false;
+            }
+
+            TableScanNode rewrittenTableScan = (TableScanNode) rewrittenFilter.getSource();
+            return Objects.equals(tableScan.getCurrentConstraint(), rewrittenTableScan.getCurrentConstraint());
         }
     }
 
@@ -113,14 +141,14 @@ public class PickTableLayout
         }
 
         @Override
-        public Optional<PlanNode> apply(TableScanNode tableScanNode, Captures captures, Context context)
+        public Result apply(TableScanNode tableScanNode, Captures captures, Context context)
         {
             if (tableScanNode.getLayout().isPresent()) {
-                return Optional.empty();
+                return Result.empty();
             }
 
             TableLayoutRewriter tableLayoutRewriter = new TableLayoutRewriter(metadata, context.getSession(), context.getSymbolAllocator(), context.getIdAllocator());
-            return Optional.of(tableLayoutRewriter.planTableScan(tableScanNode, BooleanLiteral.TRUE_LITERAL));
+            return Result.ofPlanNode(tableLayoutRewriter.planTableScan(tableScanNode, BooleanLiteral.TRUE_LITERAL));
         }
     }
 }

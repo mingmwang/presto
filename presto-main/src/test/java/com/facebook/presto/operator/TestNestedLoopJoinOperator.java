@@ -58,7 +58,7 @@ public class TestNestedLoopJoinOperator
         scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed("test-scheduledExecutor-%s"));
     }
 
-    @AfterClass
+    @AfterClass(alwaysRun = true)
     public void tearDown()
     {
         executor.shutdownNow();
@@ -496,12 +496,12 @@ public class TestNestedLoopJoinOperator
         ValuesOperatorFactory valuesOperatorFactory = new ValuesOperatorFactory(0, new PlanNodeId("test"), buildPages.getTypes(), buildPages.build());
         NestedLoopBuildOperatorFactory nestedLoopBuildOperatorFactory = new NestedLoopBuildOperatorFactory(1, new PlanNodeId("test"), buildPages.getTypes());
 
-        Driver driver = new Driver(driverContext,
+        Driver driver = Driver.createDriver(driverContext,
                 valuesOperatorFactory.createOperator(driverContext),
                 nestedLoopBuildOperatorFactory.createOperator(driverContext));
 
-        valuesOperatorFactory.close();
-        nestedLoopBuildOperatorFactory.close();
+        valuesOperatorFactory.noMoreOperators();
+        nestedLoopBuildOperatorFactory.noMoreOperators();
 
         while (!driver.isFinished()) {
             driver.process();

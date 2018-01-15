@@ -85,7 +85,10 @@ public class TestBasicQueryInfo
                                 30,
                                 DataSize.valueOf("31GB"),
                                 32,
+                                DataSize.valueOf("32GB"),
                                 ImmutableList.of()),
+                        Optional.empty(),
+                        Optional.empty(),
                         ImmutableMap.of(),
                         ImmutableSet.of(),
                         ImmutableMap.of(),
@@ -97,6 +100,7 @@ public class TestBasicQueryInfo
                         null,
                         StandardErrorCode.ABANDONED_QUERY.toErrorCode(),
                         ImmutableSet.of(),
+                        Optional.empty(),
                         Optional.empty(),
                         false,
                         Optional.empty()));

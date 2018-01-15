@@ -17,7 +17,6 @@ import com.facebook.presto.matching.Capture;
 import com.facebook.presto.matching.Captures;
 import com.facebook.presto.matching.Pattern;
 import com.facebook.presto.spi.type.Type;
-import com.facebook.presto.sql.planner.ExpressionSymbolInliner;
 import com.facebook.presto.sql.planner.PartitioningScheme;
 import com.facebook.presto.sql.planner.Symbol;
 import com.facebook.presto.sql.planner.iterative.Rule;
@@ -33,9 +32,9 @@ import com.google.common.collect.ImmutableSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import static com.facebook.presto.matching.Capture.newCapture;
+import static com.facebook.presto.sql.planner.ExpressionSymbolInliner.inlineSymbols;
 import static com.facebook.presto.sql.planner.iterative.rule.Util.restrictOutputs;
 import static com.facebook.presto.sql.planner.plan.Patterns.exchange;
 import static com.facebook.presto.sql.planner.plan.Patterns.project;
@@ -79,7 +78,7 @@ public class PushProjectionThroughExchange
     }
 
     @Override
-    public Optional<PlanNode> apply(ProjectNode project, Captures captures, Context context)
+    public Result apply(ProjectNode project, Captures captures, Context context)
     {
         ExchangeNode exchange = captures.get(CHILD);
 
@@ -106,7 +105,7 @@ public class PushProjectionThroughExchange
                 inputs.add(exchange.getPartitioningScheme().getHashColumn().get());
             }
             for (Map.Entry<Symbol, Expression> projection : project.getAssignments().entrySet()) {
-                Expression translatedExpression = translateExpression(projection.getValue(), outputToInputMap);
+                Expression translatedExpression = inlineSymbols(outputToInputMap, projection.getValue());
                 Type type = context.getSymbolAllocator().getTypes().get(projection.getKey());
                 Symbol symbol = context.getSymbolAllocator().newSymbol(translatedExpression, type);
                 projections.put(symbol, translatedExpression);
@@ -144,7 +143,7 @@ public class PushProjectionThroughExchange
                 inputsBuilder.build());
 
         // we need to strip unnecessary symbols (hash, partitioning columns).
-        return Optional.of(restrictOutputs(context.getIdAllocator(), result, ImmutableSet.copyOf(project.getOutputSymbols())).orElse(result));
+        return Result.ofPlanNode(restrictOutputs(context.getIdAllocator(), result, ImmutableSet.copyOf(project.getOutputSymbols())).orElse(result));
     }
 
     private static boolean isSymbolToSymbolProjection(ProjectNode project)
@@ -159,10 +158,5 @@ public class PushProjectionThroughExchange
             outputToInputMap.put(exchange.getOutputSymbols().get(i), exchange.getInputs().get(sourceIndex).get(i).toSymbolReference());
         }
         return outputToInputMap;
-    }
-
-    private static Expression translateExpression(Expression inputExpression, Map<Symbol, SymbolReference> symbolMapping)
-    {
-        return new ExpressionSymbolInliner(symbolMapping::get).rewrite(inputExpression);
     }
 }

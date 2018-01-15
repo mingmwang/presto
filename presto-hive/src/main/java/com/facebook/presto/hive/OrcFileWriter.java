@@ -14,7 +14,10 @@
 package com.facebook.presto.hive;
 
 import com.facebook.presto.orc.OrcDataSource;
+import com.facebook.presto.orc.OrcEncoding;
 import com.facebook.presto.orc.OrcWriter;
+import com.facebook.presto.orc.OrcWriterOptions;
+import com.facebook.presto.orc.OrcWriterStats;
 import com.facebook.presto.orc.metadata.CompressionKind;
 import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.PrestoException;
@@ -24,83 +27,63 @@ import com.facebook.presto.spi.block.BlockBuilderStatus;
 import com.facebook.presto.spi.block.RunLengthEncodedBlock;
 import com.facebook.presto.spi.type.Type;
 import com.google.common.collect.ImmutableList;
+import com.google.common.io.CountingOutputStream;
 import io.airlift.slice.OutputStreamSliceOutput;
-import io.airlift.slice.SliceOutput;
 import org.joda.time.DateTimeZone;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Callable;
 import java.util.function.Supplier;
 
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_WRITER_CLOSE_ERROR;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_WRITER_DATA_ERROR;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_WRITE_VALIDATION_FAILED;
-import static com.facebook.presto.orc.OrcWriter.DEFAULT_DICTIONARY_MEMORY_MAX_SIZE;
-import static com.facebook.presto.orc.OrcWriter.DEFAULT_ROW_GROUP_MAX_ROW_COUNT;
-import static com.facebook.presto.orc.OrcWriter.DEFAULT_STRIPE_MAX_ROW_COUNT;
-import static com.facebook.presto.orc.OrcWriter.DEFAULT_STRIPE_MAX_SIZE;
-import static com.facebook.presto.orc.OrcWriter.DEFAULT_STRIPE_MIN_ROW_COUNT;
-import static com.facebook.presto.orc.OrcWriter.createDwrfWriter;
-import static com.facebook.presto.orc.OrcWriter.createOrcWriter;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
 
 public class OrcFileWriter
         implements HiveFileWriter
 {
+    private final CountingOutputStream outputStream;
     private final OrcWriter orcWriter;
+    private final Callable<Void> rollbackAction;
     private final int[] fileInputColumnIndexes;
     private final List<Block> nullBlocks;
     private final Optional<Supplier<OrcDataSource>> validationInputFactory;
 
     public OrcFileWriter(
-            boolean isDwrf,
             OutputStream outputStream,
+            Callable<Void> rollbackAction,
+            OrcEncoding orcEncoding,
             List<String> columnNames,
             List<Type> fileColumnTypes,
             CompressionKind compression,
+            OrcWriterOptions options,
             int[] fileInputColumnIndexes,
             Map<String, String> metadata,
             DateTimeZone hiveStorageTimeZone,
-            Optional<Supplier<OrcDataSource>> validationInputFactory)
+            Optional<Supplier<OrcDataSource>> validationInputFactory,
+            OrcWriterStats stats)
     {
-        if (!(outputStream instanceof SliceOutput)) {
-            outputStream = new OutputStreamSliceOutput(outputStream);
-        }
+        this.outputStream = new CountingOutputStream(outputStream);
 
-        if (isDwrf) {
-            orcWriter = createDwrfWriter(
-                    (SliceOutput) outputStream,
-                    columnNames,
-                    fileColumnTypes,
-                    compression,
-                    DEFAULT_STRIPE_MAX_SIZE,
-                    DEFAULT_STRIPE_MIN_ROW_COUNT,
-                    DEFAULT_STRIPE_MAX_ROW_COUNT,
-                    DEFAULT_ROW_GROUP_MAX_ROW_COUNT,
-                    DEFAULT_DICTIONARY_MEMORY_MAX_SIZE,
-                    metadata,
-                    hiveStorageTimeZone,
-                    validationInputFactory.isPresent());
-        }
-        else {
-            orcWriter = createOrcWriter(
-                    (SliceOutput) outputStream,
-                    columnNames,
-                    fileColumnTypes,
-                    compression,
-                    DEFAULT_STRIPE_MAX_SIZE,
-                    DEFAULT_STRIPE_MIN_ROW_COUNT,
-                    DEFAULT_STRIPE_MAX_ROW_COUNT,
-                    DEFAULT_ROW_GROUP_MAX_ROW_COUNT,
-                    DEFAULT_DICTIONARY_MEMORY_MAX_SIZE,
-                    metadata,
-                    hiveStorageTimeZone,
-                    validationInputFactory.isPresent());
-        }
+        orcWriter = new OrcWriter(
+                new OutputStreamSliceOutput(this.outputStream),
+                columnNames,
+                fileColumnTypes,
+                orcEncoding,
+                compression,
+                options,
+                metadata,
+                hiveStorageTimeZone,
+                validationInputFactory.isPresent(),
+                stats);
+        this.rollbackAction = requireNonNull(rollbackAction, "rollbackAction is null");
 
         this.fileInputColumnIndexes = requireNonNull(fileInputColumnIndexes, "outputColumnInputIndexes is null");
 
@@ -112,6 +95,12 @@ public class OrcFileWriter
         }
         this.nullBlocks = nullBlocks.build();
         this.validationInputFactory = validationInputFactory;
+    }
+
+    @Override
+    public long getWrittenBytes()
+    {
+        return outputStream.getCount();
     }
 
     @Override
@@ -133,12 +122,11 @@ public class OrcFileWriter
                 blocks[i] = dataPage.getBlock(inputColumnIndex);
             }
         }
-
         Page page = new Page(dataPage.getPositionCount(), blocks);
         try {
             orcWriter.write(page);
         }
-        catch (Exception e) {
+        catch (IOException | UncheckedIOException e) {
             throw new PrestoException(HIVE_WRITER_DATA_ERROR, e);
         }
     }
@@ -149,8 +137,13 @@ public class OrcFileWriter
         try {
             orcWriter.close();
         }
-        catch (Exception e) {
-            // todo delete file
+        catch (IOException | UncheckedIOException e) {
+            try {
+                rollbackAction.call();
+            }
+            catch (Exception ignored) {
+                // ignore
+            }
             throw new PrestoException(HIVE_WRITER_CLOSE_ERROR, "Error committing write to Hive", e);
         }
 
@@ -160,7 +153,7 @@ public class OrcFileWriter
                     orcWriter.validate(input);
                 }
             }
-            catch (IOException e) {
+            catch (IOException | UncheckedIOException e) {
                 throw new PrestoException(HIVE_WRITE_VALIDATION_FAILED, e);
             }
         }
@@ -170,8 +163,12 @@ public class OrcFileWriter
     public void rollback()
     {
         try {
-            orcWriter.close();
-            // todo delete file
+            try {
+                orcWriter.close();
+            }
+            finally {
+                rollbackAction.call();
+            }
         }
         catch (Exception e) {
             throw new PrestoException(HIVE_WRITER_CLOSE_ERROR, "Error rolling back write to Hive", e);

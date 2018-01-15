@@ -21,7 +21,6 @@ import com.facebook.presto.sql.planner.iterative.Rule;
 import com.facebook.presto.sql.planner.plan.AggregationNode;
 import com.facebook.presto.sql.planner.plan.AggregationNode.Aggregation;
 import com.facebook.presto.sql.planner.plan.MarkDistinctNode;
-import com.facebook.presto.sql.planner.plan.PlanNode;
 import com.facebook.presto.sql.tree.FunctionCall;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
@@ -60,7 +59,7 @@ public class SingleMarkDistinctToGroupBy
     private static final Capture<MarkDistinctNode> CHILD = newCapture();
 
     private static final Pattern<AggregationNode> PATTERN = aggregation()
-            .matching(aggregation -> hasFilters(aggregation))
+            .matching(aggregation -> !hasFilters(aggregation)) // DISTINCT + Aggregation filters not currently supported
             .with(source().matching(markDistinct().capturedAs(CHILD)));
 
     private static boolean hasFilters(AggregationNode aggregationNode)
@@ -78,7 +77,7 @@ public class SingleMarkDistinctToGroupBy
     }
 
     @Override
-    public Optional<PlanNode> apply(AggregationNode parent, Captures captures, Context context)
+    public Result apply(AggregationNode parent, Captures captures, Context context)
     {
         MarkDistinctNode child = captures.get(CHILD);
 
@@ -96,16 +95,16 @@ public class SingleMarkDistinctToGroupBy
         Set<Symbol> uniqueMasks = ImmutableSet.copyOf(masks);
 
         if (uniqueMasks.size() != 1 || masks.size() != aggregations.size()) {
-            return Optional.empty();
+            return Result.empty();
         }
 
         Symbol mask = Iterables.getOnlyElement(uniqueMasks);
 
         if (!child.getMarkerSymbol().equals(mask)) {
-            return Optional.empty();
+            return Result.empty();
         }
 
-        return Optional.of(
+        return Result.ofPlanNode(
                 new AggregationNode(
                         context.getIdAllocator().getNextId(),
                         new AggregationNode(
@@ -132,7 +131,13 @@ public class SingleMarkDistinctToGroupBy
     {
         FunctionCall call = aggregation.getCall();
         return new AggregationNode.Aggregation(
-                new FunctionCall(call.getName(), call.getWindow(), false, call.getArguments()),
+                new FunctionCall(
+                        call.getName(),
+                        call.getWindow(),
+                        call.getFilter(),
+                        call.getOrderBy(),
+                        false,
+                        call.getArguments()),
                 aggregation.getSignature(),
                 Optional.empty());
     }

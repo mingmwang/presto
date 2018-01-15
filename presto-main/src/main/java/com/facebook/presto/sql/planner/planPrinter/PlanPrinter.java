@@ -116,6 +116,7 @@ import java.util.stream.Stream;
 
 import static com.facebook.presto.cost.PlanNodeCost.UNKNOWN_COST;
 import static com.facebook.presto.execution.StageInfo.getAllStages;
+import static com.facebook.presto.operator.PipelineExecutionStrategy.UNGROUPED_EXECUTION;
 import static com.facebook.presto.spi.type.VarcharType.VARCHAR;
 import static com.facebook.presto.sql.planner.DomainUtils.simplifyDomain;
 import static com.facebook.presto.sql.planner.SystemPartitioningHandle.SINGLE_DISTRIBUTION;
@@ -235,6 +236,11 @@ public class PlanPrinter
         return builder.toString();
     }
 
+    public static String textPlanFragment(PlanFragment fragment, Metadata metadata, CostCalculator costCalculator, Session session)
+    {
+        return formatFragment(metadata, costCalculator, session, fragment, Optional.empty(), Optional.empty(), false);
+    }
+
     private static String formatFragment(Metadata metadata, CostCalculator costCalculator, Session session, PlanFragment fragment, Optional<StageInfo> stageInfo, Optional<Map<PlanNodeId, PlanNodeStats>> planNodeStats, boolean verbose)
     {
         StringBuilder builder = new StringBuilder();
@@ -289,6 +295,7 @@ public class PlanPrinter
                     Joiner.on(", ").join(arguments),
                     formatHash(partitioningScheme.getHashColumn())));
         }
+        builder.append(indentString(1)).append(format("Execution Flow: %s\n", fragment.getPipelineExecutionStrategy()));
 
         if (stageInfo.isPresent()) {
             builder.append(textLogicalPlan(fragment.getRoot(), fragment.getSymbols(), metadata, costCalculator, session, planNodeStats.get(), 1, verbose))
@@ -310,7 +317,8 @@ public class PlanPrinter
                 types,
                 SINGLE_DISTRIBUTION,
                 ImmutableList.of(plan.getId()),
-                new PartitioningScheme(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()), plan.getOutputSymbols()));
+                new PartitioningScheme(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()), plan.getOutputSymbols()),
+                UNGROUPED_EXECUTION);
         return GraphvizPrinter.printLogical(ImmutableList.of(fragment));
     }
 
@@ -554,7 +562,7 @@ public class PlanPrinter
                         formatOutputs(node.getOutputSymbols()));
             }
 
-            node.getSortExpression().ifPresent(expression -> print(indent + 2, "SortExpression[%s]", expression));
+            node.getSortExpressionContext().ifPresent(context -> print(indent + 2, "SortExpression[%s]", context.getSortExpression()));
             printCost(indent + 2, node);
             printStats(indent + 2, node.getId());
             node.getLeft().accept(this, indent + 1);
@@ -1346,9 +1354,8 @@ public class PlanPrinter
             return "NULL";
         }
 
-        Signature coercion = functionRegistry.getCoercion(type, VARCHAR);
-
         try {
+            Signature coercion = functionRegistry.getCoercion(type, VARCHAR);
             Slice coerced = (Slice) new FunctionInvoker(functionRegistry).invoke(coercion, session.toConnectorSession(), value);
             return coerced.toStringUtf8();
         }

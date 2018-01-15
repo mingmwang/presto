@@ -31,8 +31,8 @@ import io.airlift.units.Duration;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import static com.facebook.presto.spi.StandardErrorCode.OPTIMIZER_TIMEOUT;
 import static com.google.common.base.Preconditions.checkArgument;
@@ -76,7 +76,7 @@ public class IterativeOptimizer
         }
 
         Memo memo = new Memo(idAllocator, plan);
-        Lookup lookup = Lookup.from(planNode -> ImmutableList.of(memo.resolve(planNode)));
+        Lookup lookup = Lookup.from(planNode -> Stream.of(memo.resolve(planNode)));
         Matcher matcher = new PlanNodeMatcher(lookup);
 
         Duration timeout = SystemSessionProperties.getOptimizerTimeout(session);
@@ -127,10 +127,10 @@ public class IterativeOptimizer
                     continue;
                 }
 
-                Optional<PlanNode> transformed = transform(node, rule, matcher, context);
+                Rule.Result result = transform(node, rule, matcher, context);
 
-                if (transformed.isPresent()) {
-                    node = context.getMemo().replace(group, transformed.get(), rule.getClass().getName());
+                if (result.getTransformedPlan().isPresent()) {
+                    node = context.getMemo().replace(group, result.getTransformedPlan().get(), rule.getClass().getName());
 
                     done = false;
                     progress = true;
@@ -141,29 +141,29 @@ public class IterativeOptimizer
         return progress;
     }
 
-    private <T> Optional<PlanNode> transform(PlanNode node, Rule<T> rule, Matcher matcher, Context context)
+    private <T> Rule.Result transform(PlanNode node, Rule<T> rule, Matcher matcher, Context context)
     {
-        Optional<PlanNode> transformed;
+        Rule.Result result;
 
         Match<T> match = matcher.match(rule.getPattern(), node);
 
         if (match.isEmpty()) {
-            return Optional.empty();
+            return Rule.Result.empty();
         }
 
         long duration;
         try {
             long start = System.nanoTime();
-            transformed = rule.apply(match.value(), match.captures(), context);
+            result = rule.apply(match.value(), match.captures(), context);
             duration = System.nanoTime() - start;
         }
         catch (RuntimeException e) {
             stats.recordFailure(rule);
             throw e;
         }
-        stats.record(rule, duration, transformed.isPresent());
+        stats.record(rule, duration, !result.isEmpty());
 
-        return transformed;
+        return result;
     }
 
     private boolean isTimeLimitExhausted(Context context)

@@ -187,7 +187,7 @@ public class MongoMetadata
     }
 
     @Override
-    public void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata)
+    public void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, boolean ignoreExisting)
     {
         mongoSession.createTable(tableMetadata.getTable(), buildColumnHandles(tableMetadata));
     }
@@ -236,6 +236,12 @@ public class MongoMetadata
         return new MongoInsertTableHandle(
                 table.getSchemaTableName(),
                 columns.stream().filter(c -> !c.isHidden()).collect(toList()));
+    }
+
+    @Override
+    public Optional<ConnectorOutputMetadata> finishInsert(ConnectorSession session, ConnectorInsertTableHandle insertHandle, Collection<Slice> fragments)
+    {
+        return Optional.empty();
     }
 
     private void setRollback(Runnable action)

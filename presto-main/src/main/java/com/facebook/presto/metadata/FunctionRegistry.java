@@ -87,13 +87,11 @@ import com.facebook.presto.operator.scalar.CombineHashFunction;
 import com.facebook.presto.operator.scalar.DateTimeFunctions;
 import com.facebook.presto.operator.scalar.EmptyMapConstructor;
 import com.facebook.presto.operator.scalar.FailureFunction;
-import com.facebook.presto.operator.scalar.GroupingOperationFunction;
 import com.facebook.presto.operator.scalar.HyperLogLogFunctions;
 import com.facebook.presto.operator.scalar.JoniRegexpCasts;
 import com.facebook.presto.operator.scalar.JoniRegexpFunctions;
 import com.facebook.presto.operator.scalar.JsonFunctions;
 import com.facebook.presto.operator.scalar.JsonOperators;
-import com.facebook.presto.operator.scalar.ListLiteralCast;
 import com.facebook.presto.operator.scalar.MapCardinalityFunction;
 import com.facebook.presto.operator.scalar.MapDistinctFromOperator;
 import com.facebook.presto.operator.scalar.MapEntriesFunction;
@@ -111,6 +109,7 @@ import com.facebook.presto.operator.scalar.ScalarFunctionImplementation;
 import com.facebook.presto.operator.scalar.SequenceFunction;
 import com.facebook.presto.operator.scalar.SplitToMapFunction;
 import com.facebook.presto.operator.scalar.StringFunctions;
+import com.facebook.presto.operator.scalar.TryFunction;
 import com.facebook.presto.operator.scalar.TypeOfFunction;
 import com.facebook.presto.operator.scalar.UrlFunctions;
 import com.facebook.presto.operator.scalar.VarbinaryFunctions;
@@ -232,8 +231,10 @@ import static com.facebook.presto.operator.scalar.Greatest.GREATEST;
 import static com.facebook.presto.operator.scalar.IdentityCast.IDENTITY_CAST;
 import static com.facebook.presto.operator.scalar.JsonStringToArrayCast.JSON_STRING_TO_ARRAY;
 import static com.facebook.presto.operator.scalar.JsonStringToMapCast.JSON_STRING_TO_MAP;
+import static com.facebook.presto.operator.scalar.JsonStringToRowCast.JSON_STRING_TO_ROW;
 import static com.facebook.presto.operator.scalar.JsonToArrayCast.JSON_TO_ARRAY;
 import static com.facebook.presto.operator.scalar.JsonToMapCast.JSON_TO_MAP;
+import static com.facebook.presto.operator.scalar.JsonToRowCast.JSON_TO_ROW;
 import static com.facebook.presto.operator.scalar.Least.LEAST;
 import static com.facebook.presto.operator.scalar.MapConcatFunction.MAP_CONCAT_FUNCTION;
 import static com.facebook.presto.operator.scalar.MapConstructor.MAP_CONSTRUCTOR;
@@ -256,6 +257,8 @@ import static com.facebook.presto.operator.scalar.RowLessThanOrEqualOperator.ROW
 import static com.facebook.presto.operator.scalar.RowNotEqualOperator.ROW_NOT_EQUAL;
 import static com.facebook.presto.operator.scalar.RowToJsonCast.ROW_TO_JSON;
 import static com.facebook.presto.operator.scalar.RowToRowCast.ROW_TO_ROW_CAST;
+import static com.facebook.presto.operator.scalar.ScalarFunctionImplementation.ArgumentProperty.valueTypeArgumentProperty;
+import static com.facebook.presto.operator.scalar.ScalarFunctionImplementation.NullConvention.RETURN_NULL_ON_NULL;
 import static com.facebook.presto.operator.scalar.TryCastFunction.TRY_CAST;
 import static com.facebook.presto.operator.scalar.ZipFunction.ZIP_FUNCTIONS;
 import static com.facebook.presto.operator.scalar.ZipWithFunction.ZIP_WITH_FUNCTION;
@@ -321,6 +324,7 @@ import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.TimeUnit.HOURS;
 
 @ThreadSafe
 public class FunctionRegistry
@@ -346,60 +350,39 @@ public class FunctionRegistry
 
         specializedFunctionKeyCache = CacheBuilder.newBuilder()
                 .maximumSize(1000)
-                .build(new CacheLoader<Signature, SpecializedFunctionKey>()
-                {
-                    @Override
-                    public SpecializedFunctionKey load(Signature key)
-                    {
-                        return doGetSpecializedFunctionKey(key);
-                    }
-                });
+                .build(CacheLoader.from(this::doGetSpecializedFunctionKey));
+
+        // TODO the function map should be updated, so that this cast can be removed
+
+        // We have observed repeated compilation of MethodHandle that leads to full GCs.
+        // We notice that flushing the following caches mitigate the problem.
+        // We suspect that it is a JVM bug that is related to stale/corrupted profiling data associated
+        // with generated classes and/or dynamically-created MethodHandles.
+        // This might also mitigate problems like deoptimization storm or unintended interpreted execution.
 
         specializedScalarCache = CacheBuilder.newBuilder()
                 .maximumSize(1000)
-                .build(new CacheLoader<SpecializedFunctionKey, ScalarFunctionImplementation>()
-                {
-                    @Override
-                    public ScalarFunctionImplementation load(SpecializedFunctionKey key)
-                            throws Exception
-                    {
-                        // TODO the function map should be updated, so that this cast can be removed
-                        SqlScalarFunction scalarFunction = (SqlScalarFunction) key.getFunction();
-                        return scalarFunction.specialize(key.getBoundVariables(), key.getArity(), typeManager, FunctionRegistry.this);
-                    }
-                });
+                .expireAfterWrite(1, HOURS)
+                .build(CacheLoader.from(key -> ((SqlScalarFunction) key.getFunction())
+                        .specialize(key.getBoundVariables(), key.getArity(), typeManager, this)));
 
         specializedAggregationCache = CacheBuilder.newBuilder()
                 .maximumSize(1000)
-                .build(new CacheLoader<SpecializedFunctionKey, InternalAggregationFunction>()
-                {
-                    @Override
-                    public InternalAggregationFunction load(SpecializedFunctionKey key)
-                            throws Exception
-                    {
-                        SqlAggregationFunction aggregationFunction = (SqlAggregationFunction) key.getFunction();
-                        return aggregationFunction.specialize(key.getBoundVariables(), key.getArity(), typeManager, FunctionRegistry.this);
-                    }
-                });
+                .expireAfterWrite(1, HOURS)
+                .build(CacheLoader.from(key -> ((SqlAggregationFunction) key.getFunction())
+                        .specialize(key.getBoundVariables(), key.getArity(), typeManager, this)));
 
         specializedWindowCache = CacheBuilder.newBuilder()
                 .maximumSize(1000)
-                .build(new CacheLoader<SpecializedFunctionKey, WindowFunctionSupplier>()
+                .expireAfterWrite(1, HOURS)
+                .build(CacheLoader.from(key ->
                 {
-                    @Override
-                    public WindowFunctionSupplier load(SpecializedFunctionKey key)
-                            throws Exception
-                    {
-                        if (key.getFunction() instanceof SqlAggregationFunction) {
-                            SqlAggregationFunction aggregationFunction = (SqlAggregationFunction) key.getFunction();
-                            return supplier(aggregationFunction.getSignature(), specializedAggregationCache.getUnchecked(key));
-                        }
-                        else {
-                            SqlWindowFunction windowFunction = (SqlWindowFunction) key.getFunction();
-                            return windowFunction.specialize(key.getBoundVariables(), key.getArity(), typeManager, FunctionRegistry.this);
-                        }
+                    if (key.getFunction() instanceof SqlAggregationFunction) {
+                        return supplier(key.getFunction().getSignature(), specializedAggregationCache.getUnchecked(key));
                     }
-                });
+                    return ((SqlWindowFunction) key.getFunction())
+                            .specialize(key.getBoundVariables(), key.getArity(), typeManager, this);
+                }));
 
         FunctionListBuilder builder = new FunctionListBuilder()
                 .window(RowNumberFunction.class)
@@ -539,8 +522,7 @@ public class FunctionRegistry
                 .scalar(MapToMapCast.class)
                 .scalars(EmptyMapConstructor.class)
                 .scalar(TypeOfFunction.class)
-                .scalars(ListLiteralCast.class)
-                .scalars(GroupingOperationFunction.class)
+                .scalar(TryFunction.class)
                 .function(ZIP_WITH_FUNCTION)
                 .functions(ZIP_FUNCTIONS)
                 .functions(ARRAY_JOIN, ARRAY_JOIN_WITH_NULL_REPLACEMENT)
@@ -577,7 +559,7 @@ public class FunctionRegistry
                 .functions(MAX_BY, MIN_BY, MAX_BY_N_AGGREGATION, MIN_BY_N_AGGREGATION)
                 .functions(MAX_N_AGGREGATION, MIN_N_AGGREGATION)
                 .function(COUNT_COLUMN)
-                .functions(ROW_HASH_CODE, ROW_TO_JSON, ROW_DISTINCT_FROM, ROW_EQUAL, ROW_GREATER_THAN, ROW_GREATER_THAN_OR_EQUAL, ROW_LESS_THAN, ROW_LESS_THAN_OR_EQUAL, ROW_NOT_EQUAL, ROW_TO_ROW_CAST)
+                .functions(ROW_HASH_CODE, ROW_TO_JSON, JSON_TO_ROW, JSON_STRING_TO_ROW, ROW_DISTINCT_FROM, ROW_EQUAL, ROW_GREATER_THAN, ROW_GREATER_THAN_OR_EQUAL, ROW_LESS_THAN, ROW_LESS_THAN_OR_EQUAL, ROW_NOT_EQUAL, ROW_TO_ROW_CAST)
                 .functions(VARCHAR_CONCAT, VARBINARY_CONCAT)
                 .function(DECIMAL_TO_DECIMAL_CAST)
                 .function(castVarcharToRe2JRegexp(featuresConfig.getRe2JDfaStatesLimit(), featuresConfig.getRe2JDfaRetries()))
@@ -769,7 +751,7 @@ public class FunctionRegistry
             }
         }
 
-        // If the return type for all the selected function is the same, and the parameters are not declared as nullable
+        // If the return type for all the selected function is the same, and the parameters are declared as RETURN_NULL_ON_NULL
         // all the functions are semantically the same. We can return just any of those.
         if (returnTypeIsTheSame(mostSpecificFunctions) && allReturnNullOnGivenInputTypes(mostSpecificFunctions, parameterTypes)) {
             // make it deterministic
@@ -847,28 +829,24 @@ public class FunctionRegistry
 
     private boolean returnsNullOnGivenInputTypes(ApplicableFunction applicableFunction, List<Type> parameterTypes)
     {
+        Signature boundSignature = applicableFunction.getBoundSignature();
+        FunctionKind functionKind = boundSignature.getKind();
+        // Window and Aggregation functions have fixed semantic where NULL values are always skipped
+        if (functionKind != SCALAR) {
+            return true;
+        }
+
         for (int i = 0; i < parameterTypes.size(); i++) {
             Type parameterType = parameterTypes.get(i);
             if (parameterType.equals(UNKNOWN)) {
-                if (parameterIsNullable(applicableFunction.getBoundSignature(), i)) {
+                // TODO: Move information about nullable arguments to FunctionSignature. Remove this hack.
+                ScalarFunctionImplementation implementation = getScalarFunctionImplementation(boundSignature);
+                if (implementation.getArgumentProperty(i).getNullConvention() != RETURN_NULL_ON_NULL) {
                     return false;
                 }
             }
         }
         return true;
-    }
-
-    private boolean parameterIsNullable(Signature boundSignature, int parameterIndex)
-    {
-        FunctionKind functionKind = boundSignature.getKind();
-        // nullable parameters can be declared only for scalar functions
-        // Window and Aggregation functions have fixed semantic where NULL values are always skipped
-        if (functionKind != SCALAR) {
-            return false;
-        }
-        // TODO: Move information about nullable arguments to FunctionSignature. Remove this hack.
-        ScalarFunctionImplementation implementation = getScalarFunctionImplementation(boundSignature);
-        return implementation.getNullableArguments().get(parameterIndex);
     }
 
     public WindowFunctionSupplier getWindowFunctionImplementation(Signature signature)
@@ -1264,7 +1242,11 @@ public class FunctionRegistry
                     parameterType.getJavaType(),
                     type.getJavaType());
 
-            return new ScalarFunctionImplementation(false, ImmutableList.of(false), methodHandle, isDeterministic());
+            return new ScalarFunctionImplementation(
+                    false,
+                    ImmutableList.of(valueTypeArgumentProperty(RETURN_NULL_ON_NULL)),
+                    methodHandle,
+                    isDeterministic());
         }
     }
 }

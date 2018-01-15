@@ -19,14 +19,12 @@ import com.facebook.presto.metadata.Signature;
 import com.facebook.presto.sql.planner.Symbol;
 import com.facebook.presto.sql.planner.iterative.Rule;
 import com.facebook.presto.sql.planner.plan.AggregationNode;
-import com.facebook.presto.sql.planner.plan.PlanNode;
 import com.facebook.presto.sql.planner.plan.ValuesNode;
 import com.facebook.presto.sql.tree.FunctionCall;
 import com.facebook.presto.sql.tree.LongLiteral;
 import com.google.common.collect.ImmutableList;
 
 import java.util.Map;
-import java.util.Optional;
 
 import static com.facebook.presto.sql.planner.optimizations.QueryCardinalityUtil.isScalar;
 import static com.facebook.presto.sql.planner.plan.Patterns.aggregation;
@@ -48,24 +46,24 @@ public class PruneCountAggregationOverScalar
     }
 
     @Override
-    public Optional<PlanNode> apply(AggregationNode parent, Captures captures, Context context)
+    public Result apply(AggregationNode parent, Captures captures, Context context)
     {
-        Map<Symbol, AggregationNode.Aggregation> assignments = parent.getAggregations();
-        if (parent.hasDefaultOutput() && assignments.size() != 1) {
-            return Optional.empty();
+        if (!parent.hasDefaultOutput() || parent.getOutputSymbols().size() != 1) {
+            return Result.empty();
         }
+        Map<Symbol, AggregationNode.Aggregation> assignments = parent.getAggregations();
         for (Map.Entry<Symbol, AggregationNode.Aggregation> entry : assignments.entrySet()) {
             AggregationNode.Aggregation aggregation = entry.getValue();
             requireNonNull(aggregation, "aggregation is null");
             Signature signature = aggregation.getSignature();
             FunctionCall functionCall = aggregation.getCall();
             if (!"count".equals(signature.getName()) || !functionCall.getArguments().isEmpty()) {
-                return Optional.empty();
+                return Result.empty();
             }
         }
         if (!assignments.isEmpty() && isScalar(parent.getSource(), context.getLookup())) {
-            return Optional.of(new ValuesNode(parent.getId(), parent.getOutputSymbols(), ImmutableList.of(ImmutableList.of(new LongLiteral("1")))));
+            return Result.ofPlanNode(new ValuesNode(parent.getId(), parent.getOutputSymbols(), ImmutableList.of(ImmutableList.of(new LongLiteral("1")))));
         }
-        return Optional.empty();
+        return Result.empty();
     }
 }

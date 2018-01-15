@@ -15,11 +15,13 @@ package com.facebook.presto.operator;
 
 import com.facebook.presto.ExceededMemoryLimitException;
 import com.facebook.presto.RowPagesBuilder;
-import com.facebook.presto.memory.AggregatedMemoryContext;
+import com.facebook.presto.memory.context.AggregatedMemoryContext;
 import com.facebook.presto.metadata.MetadataManager;
 import com.facebook.presto.metadata.Signature;
 import com.facebook.presto.operator.HashAggregationOperator.HashAggregationOperatorFactory;
 import com.facebook.presto.operator.aggregation.InternalAggregationFunction;
+import com.facebook.presto.operator.aggregation.builder.HashAggregationBuilder;
+import com.facebook.presto.operator.aggregation.builder.InMemoryHashAggregationBuilder;
 import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.block.BlockBuilder;
 import com.facebook.presto.spi.block.BlockBuilderStatus;
@@ -55,6 +57,9 @@ import java.util.concurrent.ScheduledExecutorService;
 import static com.facebook.presto.RowPagesBuilder.rowPagesBuilder;
 import static com.facebook.presto.SessionTestUtils.TEST_SESSION;
 import static com.facebook.presto.metadata.FunctionKind.AGGREGATE;
+import static com.facebook.presto.operator.GroupByHashYieldAssertion.GroupByHashYieldResult;
+import static com.facebook.presto.operator.GroupByHashYieldAssertion.createPagesWithDistinctHashKeys;
+import static com.facebook.presto.operator.GroupByHashYieldAssertion.finishOperatorWithYieldingGroupByHash;
 import static com.facebook.presto.operator.OperatorAssertion.assertOperatorEqualsIgnoreOrder;
 import static com.facebook.presto.operator.OperatorAssertion.dropChannel;
 import static com.facebook.presto.operator.OperatorAssertion.toMaterializedResult;
@@ -76,6 +81,7 @@ import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.slice.SizeOf.SIZE_OF_DOUBLE;
 import static io.airlift.slice.SizeOf.SIZE_OF_LONG;
 import static io.airlift.testing.Assertions.assertEqualsIgnoreOrder;
+import static io.airlift.testing.Assertions.assertGreaterThan;
 import static io.airlift.units.DataSize.Unit.KILOBYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.airlift.units.DataSize.succinctBytes;
@@ -125,6 +131,12 @@ public class TestHashAggregationOperator
                 {false, 0, 0},
                 {false, 8, 0},
                 {false, 8, Integer.MAX_VALUE}};
+    }
+
+    @DataProvider
+    public Object[][] dataType()
+    {
+        return new Object[][] {{VARCHAR}, {BIGINT}};
     }
 
     @AfterMethod
@@ -368,6 +380,41 @@ public class TestHashAggregationOperator
                 joinCompiler);
 
         toPages(operatorFactory, driverContext, input);
+    }
+
+    @Test(dataProvider = "dataType")
+    public void testMemoryReservationYield(Type type)
+    {
+        List<Page> input = createPagesWithDistinctHashKeys(type, 5_000, 500);
+        OperatorFactory operatorFactory = new HashAggregationOperatorFactory(
+                        0,
+                        new PlanNodeId("test"),
+                        ImmutableList.of(type),
+                        ImmutableList.of(0),
+                        ImmutableList.of(),
+                        Step.SINGLE,
+                        ImmutableList.of(COUNT.bind(ImmutableList.of(0), Optional.empty())),
+                        Optional.of(1),
+                        Optional.empty(),
+                        1,
+                        new DataSize(16, MEGABYTE),
+                        joinCompiler);
+
+        // get result with yield; pick a relatively small buffer for aggregator's memory usage
+        GroupByHashYieldResult result = finishOperatorWithYieldingGroupByHash(input, type, operatorFactory, this::getHashCapacity, 350_000);
+        assertGreaterThan(result.getYieldCount(), 5);
+        assertGreaterThan(result.getMaxReservedBytes(), 20L << 20);
+
+        int count = 0;
+        for (Page page : result.getOutput()) {
+            // value + hash + aggregation result
+            assertEquals(page.getChannelCount(), 3);
+            for (int i = 0; i < page.getPositionCount(); i++) {
+                assertEquals(page.getBlock(2).getLong(i, 0), 1);
+                count++;
+            }
+        }
+        assertEquals(count, 5_000 * 500);
     }
 
     @Test(dataProvider = "hashEnabled", expectedExceptions = ExceededMemoryLimitException.class, expectedExceptionsMessageRegExp = "Query exceeded local memory limit of 3MB")
@@ -634,6 +681,17 @@ public class TestHashAggregationOperator
                 .build()
                 .addPipelineContext(0, true, true)
                 .addDriverContext();
+    }
+
+    private int getHashCapacity(Operator operator)
+    {
+        assertTrue(operator instanceof HashAggregationOperator);
+        HashAggregationBuilder aggregationBuilder = ((HashAggregationOperator) operator).getAggregationBuilder();
+        if (aggregationBuilder == null) {
+            return 0;
+        }
+        assertTrue(aggregationBuilder instanceof InMemoryHashAggregationBuilder);
+        return ((InMemoryHashAggregationBuilder) aggregationBuilder).getCapacity();
     }
 
     private static class DummySpillerFactory

@@ -17,7 +17,6 @@ import com.facebook.presto.matching.Capture;
 import com.facebook.presto.matching.Captures;
 import com.facebook.presto.matching.Pattern;
 import com.facebook.presto.spi.type.Type;
-import com.facebook.presto.sql.planner.ExpressionSymbolInliner;
 import com.facebook.presto.sql.planner.Symbol;
 import com.facebook.presto.sql.planner.iterative.Rule;
 import com.facebook.presto.sql.planner.plan.Assignments;
@@ -32,9 +31,9 @@ import com.google.common.collect.ImmutableListMultimap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import static com.facebook.presto.matching.Capture.newCapture;
+import static com.facebook.presto.sql.planner.ExpressionSymbolInliner.inlineSymbols;
 import static com.facebook.presto.sql.planner.plan.Patterns.project;
 import static com.facebook.presto.sql.planner.plan.Patterns.source;
 import static com.facebook.presto.sql.planner.plan.Patterns.union;
@@ -54,7 +53,7 @@ public class PushProjectionThroughUnion
     }
 
     @Override
-    public Optional<PlanNode> apply(ProjectNode parent, Captures captures, Context context)
+    public Result apply(ProjectNode parent, Captures captures, Context context)
     {
         UnionNode source = captures.get(CHILD);
 
@@ -76,7 +75,7 @@ public class PushProjectionThroughUnion
 
             // Translate the assignments in the ProjectNode using symbols of the source of the UnionNode
             for (Map.Entry<Symbol, Expression> entry : parent.getAssignments().entrySet()) {
-                Expression translatedExpression = translateExpression(entry.getValue(), outputToInput);
+                Expression translatedExpression = inlineSymbols(outputToInput, entry.getValue());
                 Type type = context.getSymbolAllocator().getTypes().get(entry.getKey());
                 Symbol symbol = context.getSymbolAllocator().newSymbol(translatedExpression, type);
                 assignments.put(symbol, translatedExpression);
@@ -86,11 +85,6 @@ public class PushProjectionThroughUnion
             outputLayout.forEach(symbol -> mappings.put(symbol, projectSymbolMapping.get(symbol)));
         }
 
-        return Optional.of(new UnionNode(parent.getId(), outputSources.build(), mappings.build(), ImmutableList.copyOf(mappings.build().keySet())));
-    }
-
-    private static Expression translateExpression(Expression inputExpression, Map<Symbol, SymbolReference> symbolMapping)
-    {
-        return new ExpressionSymbolInliner(symbolMapping::get).rewrite(inputExpression);
+        return Result.ofPlanNode(new UnionNode(parent.getId(), outputSources.build(), mappings.build(), ImmutableList.copyOf(mappings.build().keySet())));
     }
 }

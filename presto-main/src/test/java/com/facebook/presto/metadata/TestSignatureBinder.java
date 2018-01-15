@@ -706,17 +706,23 @@ public class TestSignatureBinder
     {
         Signature function = functionSignature()
                 .returnType(BOOLEAN.getTypeSignature())
-                .argumentTypes(parseTypeSignature("row(bigint)"))
+                .argumentTypes(parseTypeSignature("row(integer)"))
                 .build();
 
         assertThat(function)
-                .boundTo("row(bigint)")
+                .boundTo("row(tinyint)")
                 .withCoercion()
                 .produces(new BoundVariables(
                         ImmutableMap.of(),
                         ImmutableMap.of()));
         assertThat(function)
                 .boundTo("row(integer)")
+                .withCoercion()
+                .produces(new BoundVariables(
+                        ImmutableMap.of(),
+                        ImmutableMap.of()));
+        assertThat(function)
+                .boundTo("row(bigint)")
                 .withCoercion()
                 .fails();
 
@@ -735,7 +741,9 @@ public class TestSignatureBinder
         assertThat(biFunction)
                 .boundTo("row(integer)", "row(bigint)")
                 .withCoercion()
-                .fails();
+                .produces(new BoundVariables(
+                        ImmutableMap.of("T", type("bigint")),
+                        ImmutableMap.of()));
     }
 
     @Test
@@ -1122,9 +1130,9 @@ public class TestSignatureBinder
     private class BindSignatureAssertion
     {
         private final Signature function;
-        private List<TypeSignatureProvider> argumentTypes = null;
-        private Type returnType = null;
-        private boolean allowCoercion = false;
+        private List<TypeSignatureProvider> argumentTypes;
+        private Type returnType;
+        private boolean allowCoercion;
 
         private BindSignatureAssertion(Signature function)
         {

@@ -35,7 +35,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
 
-import static com.facebook.presto.spi.resourceGroups.SchedulingPolicy.WEIGHTED;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static io.airlift.units.DataSize.Unit.BYTE;
@@ -68,15 +67,20 @@ public abstract class AbstractResourceConfigurationManager
                 checkArgument(group.getSoftCpuLimit().get().compareTo(group.getHardCpuLimit().get()) <= 0, "Soft CPU limit cannot be greater than hard CPU limit");
             }
             if (group.getSchedulingPolicy().isPresent()) {
-                if (group.getSchedulingPolicy().get() == WEIGHTED) {
-                    for (ResourceGroupSpec subGroup : group.getSubGroups()) {
-                        checkArgument(subGroup.getSchedulingWeight().isPresent(), "Must specify scheduling weight for each sub group when using \"weighted\" scheduling policy");
-                    }
-                }
-                else {
-                    for (ResourceGroupSpec subGroup : group.getSubGroups()) {
-                        checkArgument(!subGroup.getSchedulingWeight().isPresent(), "Must use \"weighted\" scheduling policy when using scheduling weight");
-                    }
+                switch (group.getSchedulingPolicy().get()) {
+                    case WEIGHTED:
+                        for (ResourceGroupSpec subGroup : group.getSubGroups()) {
+                            checkArgument(subGroup.getSchedulingWeight().isPresent(), "Must specify scheduling weight for each sub group when using \"weighted\" scheduling policy");
+                        }
+                        break;
+                    case QUERY_PRIORITY:
+                    case FAIR:
+                        for (ResourceGroupSpec subGroup : group.getSubGroups()) {
+                            checkArgument(!subGroup.getSchedulingWeight().isPresent(), "Must use \"weighted\" or \"weighted_fair\" scheduling policy when using scheduling weight");
+                        }
+                        break;
+                    default:
+                        break;
                 }
             }
         }
@@ -87,7 +91,7 @@ public abstract class AbstractResourceConfigurationManager
         ImmutableList.Builder<ResourceGroupSelector> selectors = ImmutableList.builder();
         for (SelectorSpec spec : managerSpec.getSelectors()) {
             validateSelectors(managerSpec.getRootGroups(), spec);
-            selectors.add(new StaticSelector(spec.getUserRegex(), spec.getSourceRegex(), spec.getQueryType(), spec.getGroup()));
+            selectors.add(new StaticSelector(spec.getUserRegex(), spec.getSourceRegex(), spec.getClientTags(), spec.getQueryType(), spec.getGroup()));
         }
         return selectors.build();
     }
@@ -191,7 +195,8 @@ public abstract class AbstractResourceConfigurationManager
             }
         }
         group.setMaxQueuedQueries(match.getMaxQueued());
-        group.setMaxRunningQueries(match.getMaxRunning());
+        group.setSoftConcurrencyLimit(match.getSoftConcurrencyLimit().orElse(match.getHardConcurrencyLimit()));
+        group.setHardConcurrencyLimit(match.getHardConcurrencyLimit());
         match.getQueuedTimeLimit().ifPresent(group::setQueuedTimeLimit);
         match.getRunningTimeLimit().ifPresent(group::setRunningTimeLimit);
         match.getSchedulingPolicy().ifPresent(group::setSchedulingPolicy);

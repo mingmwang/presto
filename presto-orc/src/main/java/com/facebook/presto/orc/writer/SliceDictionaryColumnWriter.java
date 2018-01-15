@@ -15,6 +15,7 @@ package com.facebook.presto.orc.writer;
 
 import com.facebook.presto.array.IntBigArray;
 import com.facebook.presto.orc.DictionaryCompressionOptimizer.DictionaryColumn;
+import com.facebook.presto.orc.OrcEncoding;
 import com.facebook.presto.orc.checkpoint.BooleanStreamCheckpoint;
 import com.facebook.presto.orc.checkpoint.LongStreamCheckpoint;
 import com.facebook.presto.orc.metadata.ColumnEncoding;
@@ -29,6 +30,7 @@ import com.facebook.presto.orc.stream.ByteArrayOutputStream;
 import com.facebook.presto.orc.stream.LongOutputStream;
 import com.facebook.presto.orc.stream.LongOutputStreamV1;
 import com.facebook.presto.orc.stream.LongOutputStreamV2;
+import com.facebook.presto.orc.stream.OutputDataStream;
 import com.facebook.presto.orc.stream.PresentOutputStream;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.DictionaryBlock;
@@ -48,6 +50,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static com.facebook.presto.orc.DictionaryCompressionOptimizer.estimateIndexBytesPerValue;
+import static com.facebook.presto.orc.OrcEncoding.DWRF;
 import static com.facebook.presto.orc.metadata.ColumnEncoding.ColumnEncodingKind.DICTIONARY;
 import static com.facebook.presto.orc.metadata.ColumnEncoding.ColumnEncodingKind.DICTIONARY_V2;
 import static com.facebook.presto.orc.metadata.CompressionKind.NONE;
@@ -67,7 +70,7 @@ public class SliceDictionaryColumnWriter
     private final Type type;
     private final CompressionKind compression;
     private final int bufferSize;
-    private final boolean isDwrf;
+    private final OrcEncoding orcEncoding;
 
     private final LongOutputStream dataStream;
     private final PresentOutputStream presentStream;
@@ -91,16 +94,16 @@ public class SliceDictionaryColumnWriter
     private boolean directEncoded;
     private SliceDirectColumnWriter directColumnWriter;
 
-    public SliceDictionaryColumnWriter(int column, Type type, CompressionKind compression, int bufferSize, boolean isDwrf)
+    public SliceDictionaryColumnWriter(int column, Type type, CompressionKind compression, int bufferSize, OrcEncoding orcEncoding)
     {
         checkArgument(column >= 0, "column is negative");
         this.column = column;
         this.type = requireNonNull(type, "type is null");
         this.compression = requireNonNull(compression, "compression is null");
         this.bufferSize = bufferSize;
-        this.isDwrf = isDwrf;
+        this.orcEncoding = requireNonNull(orcEncoding, "orcEncoding is null");
         LongOutputStream result;
-        if (isDwrf) {
+        if (orcEncoding == DWRF) {
             result = new LongOutputStreamV1(compression, bufferSize, false, DATA);
         }
         else {
@@ -109,7 +112,7 @@ public class SliceDictionaryColumnWriter
         this.dataStream = result;
         this.presentStream = new PresentOutputStream(compression, bufferSize);
         this.dictionaryDataStream = new ByteArrayOutputStream(compression, bufferSize, StreamKind.DICTIONARY_DATA);
-        this.dictionaryLengthStream = createLengthOutputStream(compression, bufferSize, isDwrf);
+        this.dictionaryLengthStream = createLengthOutputStream(compression, bufferSize, orcEncoding);
         values = new IntBigArray();
     }
 
@@ -151,7 +154,7 @@ public class SliceDictionaryColumnWriter
         checkState(!closed);
         checkState(!directEncoded);
         if (directColumnWriter == null) {
-            directColumnWriter = new SliceDirectColumnWriter(column, type, compression, bufferSize, isDwrf, StringStatisticsBuilder::new);
+            directColumnWriter = new SliceDirectColumnWriter(column, type, compression, bufferSize, orcEncoding, StringStatisticsBuilder::new);
         }
 
         Block dictionaryValues = dictionary.getElementBlock();
@@ -301,7 +304,7 @@ public class SliceDictionaryColumnWriter
                 dictionaryDataStream.writeSlice(value);
             }
         }
-        columnEncoding = new ColumnEncoding(isDwrf ? DICTIONARY : DICTIONARY_V2, dictionaryElements.getPositionCount() - 1);
+        columnEncoding = new ColumnEncoding(orcEncoding == DWRF ? DICTIONARY : DICTIONARY_V2, dictionaryElements.getPositionCount() - 1);
 
         // build index from original dictionary index to new sorted position
         int[] originalDictionaryToSortedIndex = new int[sortedDictionaryIndexes.length];
@@ -419,23 +422,21 @@ public class SliceDictionaryColumnWriter
     }
 
     @Override
-    public List<Stream> writeDataStreams(SliceOutput outputStream)
-            throws IOException
+    public List<OutputDataStream> getOutputDataStreams()
     {
         checkState(closed);
 
         if (directEncoded) {
-            return directColumnWriter.writeDataStreams(outputStream);
+            return directColumnWriter.getOutputDataStreams();
         }
 
         // actually write data
-        ImmutableList.Builder<Stream> dataStreams = ImmutableList.builder();
-
-        presentStream.writeDataStreams(column, outputStream).ifPresent(dataStreams::add);
-        dataStream.writeDataStreams(column, outputStream).ifPresent(dataStreams::add);
-        dictionaryLengthStream.writeDataStreams(column, outputStream).ifPresent(dataStreams::add);
-        dictionaryDataStream.writeDataStreams(column, outputStream).ifPresent(dataStreams::add);
-        return dataStreams.build();
+        ImmutableList.Builder<OutputDataStream> outputDataStreams = ImmutableList.builder();
+        outputDataStreams.add(new OutputDataStream(sliceOutput -> presentStream.writeDataStreams(column, sliceOutput), presentStream.getBufferedBytes()));
+        outputDataStreams.add(new OutputDataStream(sliceOutput -> dataStream.writeDataStreams(column, sliceOutput), dataStream.getBufferedBytes()));
+        outputDataStreams.add(new OutputDataStream(sliceOutput -> dictionaryLengthStream.writeDataStreams(column, sliceOutput), dictionaryLengthStream.getBufferedBytes()));
+        outputDataStreams.add(new OutputDataStream(sliceOutput -> dictionaryDataStream.writeDataStreams(column, sliceOutput), dictionaryDataStream.getBufferedBytes()));
+        return outputDataStreams.build();
     }
 
     @Override

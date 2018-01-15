@@ -34,6 +34,7 @@ public final class HiveSessionProperties
     private static final String ORC_MAX_BUFFER_SIZE = "orc_max_buffer_size";
     private static final String ORC_STREAM_BUFFER_SIZE = "orc_stream_buffer_size";
     private static final String ORC_MAX_READ_BLOCK_SIZE = "orc_max_read_block_size";
+    private static final String ORC_LAZY_READ_SMALL_RANGES = "orc_lazy_read_small_ranges";
     private static final String ORC_OPTIMIZED_WRITER_ENABLED = "orc_optimized_writer_enabled";
     private static final String ORC_OPTIMIZED_WRITER_VALIDATE = "orc_optimized_writer_validate";
     private static final String PARQUET_PREDICATE_PUSHDOWN_ENABLED = "parquet_predicate_pushdown_enabled";
@@ -86,6 +87,11 @@ public final class HiveSessionProperties
                         config.getOrcMaxReadBlockSize(),
                         false),
                 booleanSessionProperty(
+                        ORC_LAZY_READ_SMALL_RANGES,
+                        "Experimental: ORC: Read small file segments lazily",
+                        config.isOrcLazyReadSmallRanges(),
+                        false),
+                booleanSessionProperty(
                         ORC_OPTIMIZED_WRITER_ENABLED,
                         "Experimental: ORC: Enable optimized writer",
                         config.isOrcOptimizedWriterEnabled(),
@@ -93,7 +99,7 @@ public final class HiveSessionProperties
                 booleanSessionProperty(
                         ORC_OPTIMIZED_WRITER_VALIDATE,
                         "Experimental: ORC: Validate writer files",
-                        true,
+                        config.isOrcWriterValidate(),
                         false),
                 booleanSessionProperty(
                         PARQUET_OPTIMIZED_READER_ENABLED,
@@ -175,6 +181,11 @@ public final class HiveSessionProperties
     public static DataSize getOrcMaxReadBlockSize(ConnectorSession session)
     {
         return session.getProperty(ORC_MAX_READ_BLOCK_SIZE, DataSize.class);
+    }
+
+    public static boolean getOrcLazyReadSmallRanges(ConnectorSession session)
+    {
+        return session.getProperty(ORC_LAZY_READ_SMALL_RANGES, Boolean.class);
     }
 
     public static boolean isOrcOptimizedWriterEnabled(ConnectorSession session)

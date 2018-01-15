@@ -14,6 +14,8 @@
 package com.facebook.presto.operator.project;
 
 import com.facebook.presto.array.ReferenceCountMap;
+import com.facebook.presto.operator.DriverYieldSignal;
+import com.facebook.presto.operator.Work;
 import com.facebook.presto.spi.ConnectorSession;
 import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.block.Block;
@@ -71,7 +73,7 @@ public class PageProcessor
                 .collect(toImmutableList());
     }
 
-    public PageProcessorOutput process(ConnectorSession session, Page page)
+    public PageProcessorOutput process(ConnectorSession session, DriverYieldSignal yieldSignal, Page page)
     {
         // limit the scope of the dictionary ids to just one page
         dictionarySourceIdFunction.reset();
@@ -87,16 +89,16 @@ public class PageProcessor
             }
 
             if (projections.isEmpty()) {
-                return new PageProcessorOutput(() -> calculateRetainedSizeWithoutLoading(page), singletonIterator(new Page(selectedPositions.size())));
+                return new PageProcessorOutput(() -> calculateRetainedSizeWithoutLoading(page), singletonIterator(Optional.of(new Page(selectedPositions.size()))));
             }
 
             if (selectedPositions.size() != page.getPositionCount()) {
-                PositionsPageProcessorIterator pages = new PositionsPageProcessorIterator(session, page, selectedPositions);
+                PositionsPageProcessorIterator pages = new PositionsPageProcessorIterator(session, yieldSignal, page, selectedPositions);
                 return new PageProcessorOutput(pages::getRetainedSizeInBytes, pages);
             }
         }
 
-        PositionsPageProcessorIterator pages = new PositionsPageProcessorIterator(session, page, positionsRange(0, page.getPositionCount()));
+        PositionsPageProcessorIterator pages = new PositionsPageProcessorIterator(session, yieldSignal, page, positionsRange(0, page.getPositionCount()));
         return new PageProcessorOutput(pages::getRetainedSizeInBytes, pages);
     }
 
@@ -123,18 +125,25 @@ public class PageProcessor
     }
 
     private class PositionsPageProcessorIterator
-            extends AbstractIterator<Page>
+            extends AbstractIterator<Optional<Page>>
     {
         private final ConnectorSession session;
+        private final DriverYieldSignal yieldSignal;
         private final Page page;
 
         private SelectedPositions selectedPositions;
         private final Block[] previouslyComputedResults;
         private long retainedSizeInBytes;
 
-        public PositionsPageProcessorIterator(ConnectorSession session, Page page, SelectedPositions selectedPositions)
+        // remember if we need to re-use the same batch size if we yield last time
+        private boolean lastComputeYielded;
+        private int lastComputeBatchSize;
+        private Work<Block> pageProjectWork;
+
+        public PositionsPageProcessorIterator(ConnectorSession session, DriverYieldSignal yieldSignal, Page page, SelectedPositions selectedPositions)
         {
             this.session = session;
+            this.yieldSignal = yieldSignal;
             this.page = page;
             this.selectedPositions = selectedPositions;
             this.previouslyComputedResults = new Block[projections.size()];
@@ -147,25 +156,45 @@ public class PageProcessor
         }
 
         @Override
-        protected Page computeNext()
+        protected Optional<Page> computeNext()
         {
+            int batchSize;
             while (true) {
                 if (selectedPositions.isEmpty()) {
                     updateRetainedSize();
+                    verify(!lastComputeYielded);
                     return endOfData();
                 }
 
-                int batchSize = Math.min(selectedPositions.size(), projectBatchSize);
-                Optional<Page> result = processBatch(batchSize);
+                // we always process one chunk
+                if (lastComputeYielded) {
+                    // re-use the batch size from the last checkpoint
+                    verify(lastComputeBatchSize > 0);
+                    batchSize = lastComputeBatchSize;
+                    lastComputeYielded = false;
+                    lastComputeBatchSize = 0;
+                }
+                else {
+                    batchSize = Math.min(selectedPositions.size(), projectBatchSize);
+                }
+                ProcessBatchResult result = processBatch(batchSize);
 
-                // if the page buffer filled up, so halve the batch size and retry
-                if (!result.isPresent()) {
+                if (result.isYieldFinish()) {
+                    // if we are running out of time, save the batch size and continue next time
+                    lastComputeYielded = true;
+                    lastComputeBatchSize = batchSize;
+                    return Optional.empty();
+                }
+
+                if (result.isPageTooLarge()) {
+                    // if the page buffer filled up, so halve the batch size and retry
                     verify(batchSize > 1);
                     projectBatchSize = projectBatchSize / 2;
                     continue;
                 }
 
-                Page page = result.get();
+                verify(result.isSuccess());
+                Page page = result.getPage();
 
                 // if we produced a large page, halve the batch size for the next call
                 long pageSize = page.getSizeInBytes();
@@ -190,7 +219,7 @@ public class PageProcessor
                 }
 
                 updateRetainedSize();
-                return page;
+                return Optional.of(page);
             }
         }
 
@@ -202,7 +231,7 @@ public class PageProcessor
             for (Block block : page.getBlocks()) {
                 if (!isUnloadedLazyBlock(block)) {
                     block.retainedBytesForEachPart((object, size) -> {
-                        if (referenceCountMap.incrementReference(object) == 1) {
+                        if (referenceCountMap.incrementAndGet(object) == 1) {
                             retainedSizeInBytes += size;
                         }
                     });
@@ -211,7 +240,7 @@ public class PageProcessor
             for (Block previouslyComputedResult : previouslyComputedResults) {
                 if (previouslyComputedResult != null) {
                     previouslyComputedResult.retainedBytesForEachPart((object, size) -> {
-                        if (referenceCountMap.incrementReference(object) == 1) {
+                        if (referenceCountMap.incrementAndGet(object) == 1) {
                             retainedSizeInBytes += size;
                         }
                     });
@@ -219,30 +248,41 @@ public class PageProcessor
             }
         }
 
-        private Optional<Page> processBatch(int batchSize)
+        private ProcessBatchResult processBatch(int batchSize)
         {
             Block[] blocks = new Block[projections.size()];
 
             int pageSize = 0;
             SelectedPositions positionsBatch = selectedPositions.subRange(0, batchSize);
             for (int i = 0; i < projections.size(); i++) {
+                if (yieldSignal.isSet()) {
+                    return ProcessBatchResult.processBatchYield();
+                }
+
                 if (positionsBatch.size() > 1 && pageSize > MAX_PAGE_SIZE_IN_BYTES) {
-                    return Optional.empty();
+                    return ProcessBatchResult.processBatchTooLarge();
                 }
 
                 // if possible, use previouslyComputedResults produced in prior optimistic failure attempt
                 PageProjection projection = projections.get(i);
-                if (previouslyComputedResults[i] != null && previouslyComputedResults[i].getPositionCount() > batchSize) {
+                if (previouslyComputedResults[i] != null && previouslyComputedResults[i].getPositionCount() >= batchSize) {
                     blocks[i] = previouslyComputedResults[i].getRegion(0, batchSize);
                 }
                 else {
-                    previouslyComputedResults[i] = projection.project(session, projection.getInputChannels().getInputChannels(page), positionsBatch);
+                    if (pageProjectWork == null) {
+                        pageProjectWork = projection.project(session, yieldSignal, projection.getInputChannels().getInputChannels(page), positionsBatch);
+                    }
+                    if (!pageProjectWork.process()) {
+                        return ProcessBatchResult.processBatchYield();
+                    }
+                    previouslyComputedResults[i] = pageProjectWork.getResult();
+                    pageProjectWork = null;
                     blocks[i] = previouslyComputedResults[i];
                 }
 
                 pageSize += blocks[i].getSizeInBytes();
             }
-            return Optional.of(new Page(positionsBatch.size(), blocks));
+            return ProcessBatchResult.processBatchSuccess(new Page(positionsBatch.size(), blocks));
         }
     }
 
@@ -261,6 +301,62 @@ public class PageProcessor
         public void reset()
         {
             dictionarySourceIds.clear();
+        }
+    }
+
+    private static class ProcessBatchResult
+    {
+        private final ProcessBatchState state;
+        private final Page page;
+
+        private ProcessBatchResult(ProcessBatchState state, Page page)
+        {
+            this.state = state;
+            this.page = page;
+        }
+
+        public static ProcessBatchResult processBatchYield()
+        {
+            return new ProcessBatchResult(ProcessBatchState.YIELD, null);
+        }
+
+        public static ProcessBatchResult processBatchTooLarge()
+        {
+            return new ProcessBatchResult(ProcessBatchState.PAGE_TOO_LARGE, null);
+        }
+
+        public static ProcessBatchResult processBatchSuccess(Page page)
+        {
+            return new ProcessBatchResult(ProcessBatchState.SUCCESS, requireNonNull(page));
+        }
+
+        public boolean isYieldFinish()
+        {
+            return state == ProcessBatchState.YIELD;
+        }
+
+        public boolean isPageTooLarge()
+        {
+            return state == ProcessBatchState.PAGE_TOO_LARGE;
+        }
+
+        public boolean isSuccess()
+        {
+            return state == ProcessBatchState.SUCCESS;
+        }
+
+        public Page getPage()
+        {
+            verify(page != null);
+            verify(state == ProcessBatchState.SUCCESS);
+            return page;
+        }
+
+        private enum ProcessBatchState
+        {
+            YIELD,
+            PAGE_TOO_LARGE,
+            SUCCESS
         }
     }
 }

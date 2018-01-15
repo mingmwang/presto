@@ -105,12 +105,6 @@ public class RcFilePageSource
     }
 
     @Override
-    public long getTotalBytes()
-    {
-        return rcFileReader.getLength();
-    }
-
-    @Override
     public long getCompletedBytes()
     {
         return rcFileReader.getBytesRead();
@@ -159,6 +153,10 @@ public class RcFilePageSource
         catch (PrestoException e) {
             closeWithSuppression(e);
             throw e;
+        }
+        catch (RcFileCorruptionException e) {
+            closeWithSuppression(e);
+            throw new PrestoException(HIVE_BAD_DATA, e);
         }
         catch (IOException | RuntimeException e) {
             closeWithSuppression(e);
@@ -241,10 +239,10 @@ public class RcFilePageSource
                 Block block = rcFileReader.readBlock(columnIndex);
                 lazyBlock.setBlock(block);
             }
+            catch (RcFileCorruptionException e) {
+                throw new PrestoException(HIVE_BAD_DATA, e);
+            }
             catch (IOException e) {
-                if (e instanceof RcFileCorruptionException) {
-                    throw new PrestoException(HIVE_BAD_DATA, e);
-                }
                 throw new PrestoException(HIVE_CURSOR_ERROR, e);
             }
 

@@ -14,13 +14,12 @@
 package com.facebook.presto.sql.planner.iterative;
 
 import com.facebook.presto.sql.planner.plan.PlanNode;
-import com.google.common.collect.ImmutableList;
 
-import java.util.List;
 import java.util.function.Function;
+import java.util.stream.Stream;
 
-import static com.google.common.base.Verify.verify;
-import static com.google.common.collect.Iterables.getOnlyElement;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.collect.MoreCollectors.toOptional;
 
 public interface Lookup
 {
@@ -35,17 +34,19 @@ public interface Lookup
     @Deprecated
     default PlanNode resolve(PlanNode node)
     {
-        return getOnlyElement(resolveGroup(node));
+        if (node instanceof GroupReference) {
+            return resolveGroup(node).collect(toOptional()).get();
+        }
+        return node;
     }
 
     /**
      * Resolves nodes by materializing GroupReference nodes
      * representing symbolic references to other nodes.
      * <p>
-     * If the node is not a GroupReference, it returns the
-     * singleton of the argument node.
+     * @throws IllegalArgumentException if the node is not a GroupReference
      */
-    List<PlanNode> resolveGroup(PlanNode node);
+    Stream<PlanNode> resolveGroup(PlanNode node);
 
     /**
      * A Lookup implementation that does not perform lookup. It satisfies contract
@@ -54,19 +55,15 @@ public interface Lookup
     static Lookup noLookup()
     {
         return node -> {
-            verify(!(node instanceof GroupReference), "Unexpected GroupReference");
-            return ImmutableList.of(node);
+            throw new UnsupportedOperationException();
         };
     }
 
-    static Lookup from(Function<GroupReference, List<PlanNode>> resolver)
+    static Lookup from(Function<GroupReference, Stream<PlanNode>> resolver)
     {
         return node -> {
-            if (node instanceof GroupReference) {
-                return resolver.apply((GroupReference) node);
-            }
-
-            return ImmutableList.of(node);
+            checkArgument(node instanceof GroupReference, "Node '%s' is not a GroupReference", node.getClass().getSimpleName());
+            return resolver.apply((GroupReference) node);
         };
     }
 }

@@ -23,9 +23,11 @@ import java.util.Map;
 
 import static com.facebook.presto.sql.analyzer.RegexLibrary.JONI;
 import static com.facebook.presto.sql.analyzer.RegexLibrary.RE2J;
-import static io.airlift.configuration.testing.ConfigAssertions.assertDeprecatedEquivalence;
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
+import static io.airlift.units.DataSize.Unit.GIGABYTE;
+import static io.airlift.units.DataSize.Unit.KILOBYTE;
+import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
@@ -42,6 +44,8 @@ public class TestFeaturesConfig
                 .setColocatedJoinsEnabled(false)
                 .setJoinReorderingEnabled(true)
                 .setRedistributeWrites(true)
+                .setScaleWriters(false)
+                .setWriterMinSize(new DataSize(32, MEGABYTE))
                 .setOptimizeMetadataQueries(false)
                 .setOptimizeHashGeneration(true)
                 .setOptimizeSingleDistinct(true)
@@ -64,46 +68,19 @@ public class TestFeaturesConfig
                 .setIterativeOptimizerEnabled(true)
                 .setIterativeOptimizerTimeout(new Duration(3, MINUTES))
                 .setExchangeCompressionEnabled(false)
+                .setLegacyTimestamp(true)
                 .setEnableIntermediateAggregations(false)
-                .setPushAggregationThroughJoin(true));
+                .setPushAggregationThroughJoin(true)
+                .setParseDecimalLiteralsAsDouble(true)
+                .setForceSingleNodeOutput(true)
+                .setPagesIndexEagerCompactionEnabled(false)
+                .setFilterAndProjectMinOutputPageSize(new DataSize(25, KILOBYTE))
+                .setFilterAndProjectMinOutputPageRowCount(256));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> propertiesLegacy = new ImmutableMap.Builder<String, String>()
-                .put("experimental.resource-groups-enabled", "true")
-                .put("experimental.iterative-optimizer-enabled", "false")
-                .put("experimental.iterative-optimizer-timeout", "10s")
-                .put("deprecated.legacy-array-agg", "true")
-                .put("deprecated.legacy-order-by", "true")
-                .put("deprecated.legacy-map-subscript", "true")
-                .put("distributed-index-joins-enabled", "true")
-                .put("distributed-joins-enabled", "false")
-                .put("fast-inequality-joins", "false")
-                .put("colocated-joins-enabled", "true")
-                .put("reorder-joins", "false")
-                .put("redistribute-writes", "false")
-                .put("optimizer.optimize-metadata-queries", "true")
-                .put("optimizer.optimize-hash-generation", "false")
-                .put("optimizer.optimize-single-distinct", "false")
-                .put("optimizer.optimize-mixed-distinct-aggregations", "true")
-                .put("optimizer.push-table-write-through-union", "false")
-                .put("optimizer.dictionary-aggregation", "true")
-                .put("optimizer.push-aggregation-through-join", "false")
-                .put("regex-library", "RE2J")
-                .put("re2j.dfa-states-limit", "42")
-                .put("re2j.dfa-retries", "42")
-                .put("experimental.spill-enabled", "true")
-                .put("experimental.aggregation-operator-unspill-memory-limit", "100MB")
-                .put("experimental.spiller-spill-path", "/tmp/custom/spill/path1,/tmp/custom/spill/path2")
-                .put("experimental.spiller-threads", "42")
-                .put("experimental.spiller-max-used-space-threshold", "0.8")
-                .put("experimental.memory-revoking-threshold", "0.2")
-                .put("experimental.memory-revoking-target", "0.8")
-                .put("exchange.compression-enabled", "true")
-                .put("optimizer.enable-intermediate-aggregations", "true")
-                .build();
         Map<String, String> properties = new ImmutableMap.Builder<String, String>()
                 .put("experimental.resource-groups-enabled", "true")
                 .put("experimental.iterative-optimizer-enabled", "false")
@@ -117,6 +94,8 @@ public class TestFeaturesConfig
                 .put("colocated-joins-enabled", "true")
                 .put("reorder-joins", "false")
                 .put("redistribute-writes", "false")
+                .put("scale-writers", "true")
+                .put("writer-min-size", "42GB")
                 .put("optimizer.optimize-metadata-queries", "true")
                 .put("optimizer.optimize-hash-generation", "false")
                 .put("optimizer.optimize-single-distinct", "false")
@@ -135,7 +114,13 @@ public class TestFeaturesConfig
                 .put("experimental.memory-revoking-threshold", "0.2")
                 .put("experimental.memory-revoking-target", "0.8")
                 .put("exchange.compression-enabled", "true")
+                .put("deprecated.legacy-timestamp", "false")
                 .put("optimizer.enable-intermediate-aggregations", "true")
+                .put("parse-decimal-literals-as-double", "false")
+                .put("optimizer.force-single-node-output", "false")
+                .put("pages-index.eager-compaction-enabled", "true")
+                .put("experimental.filter-and-project-min-output-page-size", "1MB")
+                .put("experimental.filter-and-project-min-output-page-row-count", "2048")
                 .build();
 
         FeaturesConfig expected = new FeaturesConfig()
@@ -148,6 +133,8 @@ public class TestFeaturesConfig
                 .setColocatedJoinsEnabled(true)
                 .setJoinReorderingEnabled(false)
                 .setRedistributeWrites(false)
+                .setScaleWriters(true)
+                .setWriterMinSize(new DataSize(42, GIGABYTE))
                 .setOptimizeMetadataQueries(true)
                 .setOptimizeHashGeneration(false)
                 .setOptimizeSingleDistinct(false)
@@ -169,9 +156,14 @@ public class TestFeaturesConfig
                 .setMemoryRevokingTarget(0.8)
                 .setLegacyOrderBy(true)
                 .setExchangeCompressionEnabled(true)
-                .setEnableIntermediateAggregations(true);
+                .setLegacyTimestamp(false)
+                .setEnableIntermediateAggregations(true)
+                .setParseDecimalLiteralsAsDouble(false)
+                .setForceSingleNodeOutput(false)
+                .setPagesIndexEagerCompactionEnabled(true)
+                .setFilterAndProjectMinOutputPageSize(new DataSize(1, MEGABYTE))
+                .setFilterAndProjectMinOutputPageRowCount(2048);
 
         assertFullMapping(properties, expected);
-        assertDeprecatedEquivalence(FeaturesConfig.class, properties, propertiesLegacy);
     }
 }

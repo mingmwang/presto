@@ -96,7 +96,7 @@ public class TestSqlTask
                 new TaskManagerConfig());
     }
 
-    @AfterClass
+    @AfterClass(alwaysRun = true)
     public void destroy()
             throws Exception
     {
@@ -303,6 +303,7 @@ public class TestSqlTask
         return new SqlTask(
                 taskId,
                 location,
+                "fake",
                 new QueryContext(new QueryId("query"), new DataSize(1, MEGABYTE), new MemoryPool(new MemoryPoolId("test"), new DataSize(1, GIGABYTE)), new MemoryPool(new MemoryPoolId("testSystem"), new DataSize(1, GIGABYTE)), taskNotificationExecutor, driverYieldExecutor, new DataSize(1, MEGABYTE), new SpillSpaceTracker(new DataSize(1, GIGABYTE))),
                 sqlTaskExecutionFactory,
                 taskNotificationExecutor,

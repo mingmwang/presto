@@ -23,6 +23,7 @@ import com.google.common.collect.ImmutableMap;
 
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 
 import static com.facebook.presto.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
 import static com.google.common.base.MoreObjects.toStringHelper;
@@ -34,6 +35,7 @@ public class FullConnectorSession
 {
     private final String queryId;
     private final Identity identity;
+    private final Optional<String> source;
     private final TimeZoneKey timeZoneKey;
     private final Locale locale;
     private final long startTime;
@@ -41,16 +43,20 @@ public class FullConnectorSession
     private final ConnectorId connectorId;
     private final String catalog;
     private final SessionPropertyManager sessionPropertyManager;
+    private final boolean isLegacyTimestamp;
 
     public FullConnectorSession(
             String queryId,
             Identity identity,
+            Optional<String> source,
             TimeZoneKey timeZoneKey,
             Locale locale,
-            long startTime)
+            long startTime,
+            boolean isLegacyTimestamp)
     {
         this.queryId = requireNonNull(queryId, "queryId is null");
         this.identity = requireNonNull(identity, "identity is null");
+        this.source = requireNonNull(source, "source is null");
         this.timeZoneKey = requireNonNull(timeZoneKey, "timeZoneKey is null");
         this.locale = requireNonNull(locale, "locale is null");
         this.startTime = startTime;
@@ -59,21 +65,25 @@ public class FullConnectorSession
         this.connectorId = null;
         this.catalog = null;
         this.sessionPropertyManager = null;
+        this.isLegacyTimestamp = isLegacyTimestamp;
     }
 
     public FullConnectorSession(
             String queryId,
             Identity identity,
+            Optional<String> source,
             TimeZoneKey timeZoneKey,
             Locale locale,
             long startTime,
             Map<String, String> properties,
             ConnectorId connectorId,
             String catalog,
-            SessionPropertyManager sessionPropertyManager)
+            SessionPropertyManager sessionPropertyManager,
+            boolean isLegacyTimestamp)
     {
         this.queryId = requireNonNull(queryId, "queryId is null");
         this.identity = requireNonNull(identity, "identity is null");
+        this.source = requireNonNull(source, "source is null");
         this.timeZoneKey = requireNonNull(timeZoneKey, "timeZoneKey is null");
         this.locale = requireNonNull(locale, "locale is null");
         this.startTime = startTime;
@@ -82,12 +92,19 @@ public class FullConnectorSession
         this.connectorId = requireNonNull(connectorId, "connectorId is null");
         this.catalog = requireNonNull(catalog, "catalog is null");
         this.sessionPropertyManager = requireNonNull(sessionPropertyManager, "sessionPropertyManager is null");
+        this.isLegacyTimestamp = isLegacyTimestamp;
     }
 
     @Override
     public String getQueryId()
     {
         return queryId;
+    }
+
+    @Override
+    public Optional<String> getSource()
+    {
+        return source;
     }
 
     @Override
@@ -115,6 +132,12 @@ public class FullConnectorSession
     }
 
     @Override
+    public boolean isLegacyTimestamp()
+    {
+        return isLegacyTimestamp;
+    }
+
+    @Override
     public <T> T getProperty(String propertyName, Class<T> type)
     {
         if (properties == null) {
@@ -131,10 +154,12 @@ public class FullConnectorSession
                 .omitNullValues()
                 .add("queryId", queryId)
                 .add("user", getUser())
+                .add("source", source.orElse(null))
                 .add("timeZoneKey", timeZoneKey)
                 .add("locale", locale)
                 .add("startTime", startTime)
                 .add("properties", properties)
+                .omitNullValues()
                 .toString();
     }
 }
